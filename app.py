@@ -1,110 +1,156 @@
+import streamlit as st
+import pandas as pd
+import unicodedata
 import io
 
-import pandas as pd
-import streamlit as st
+st.set_page_config(page_title="Éditeur Python - XLSX / CSV", page_icon="🐍", layout="wide")
 
-st.set_page_config(page_title="Éditeur Python XLSX/CSV", layout="wide")
-st.title("📊 Éditeur Python — fichiers XLSX / CSV")
-st.markdown("Chargez un fichier, appliquez un traitement Python, puis téléchargez le résultat.")
+st.title("🐍 Éditeur Python — traitement de fichiers XLSX / CSV")
+st.markdown(
+    "Chargez un fichier **.xlsx** ou **.csv**, appliquez des traitements "
+    "automatiques ou écrivez votre propre code Python, puis téléchargez le résultat."
+)
 
-# ---------- Chargement ----------
-uploaded = st.file_uploader("Charger un fichier (.csv ou .xlsx)", type=["csv", "xlsx"])
-if uploaded is None:
-    st.info("⬆️ Commencez par charger un fichier CSV ou XLSX.")
-    st.stop()
+# ── Chargement du fichier ─────────────────────────────────────────────
+uploaded = st.file_uploader("📂 Charger un fichier", type=["xlsx", "csv"])
 
-try:
-    if uploaded.name.lower().endswith(".csv"):
-        df = pd.read_csv(uploaded, sep=None, engine="python")
-    else:
-        df = pd.read_excel(uploaded)
-except Exception as e:
-    st.error(f"Erreur de lecture du fichier : {e}")
-    st.stop()
+df = None
+if uploaded is not None:
+    try:
+        if uploaded.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded)
+        else:
+            df = pd.read_excel(uploaded)
+        st.success(f"Fichier **{uploaded.name}** chargé : {df.shape[0]} lignes × {df.shape[1]} colonnes.")
+    except Exception as e:
+        st.error(f"Erreur lors du chargement : {e}")
 
-st.success(f"Fichier **{uploaded.name}** chargé : {df.shape[0]} lignes × {df.shape[1]} colonnes.")
+# ── Traitements automatiques ──────────────────────────────────────────
+if df is not None:
+    st.header("⚙️ Traitements automatiques")
 
-# ---------- Aperçu ----------
-st.subheader("Aperçu des données")
-st.dataframe(df.head(50), use_container_width=True)
+    trim_spaces = st.checkbox("Supprimer les espaces en début/fin de valeurs")
+    remove_accents = st.checkbox(
+        "Enlever tous les accents (remplacés par la lettre correspondante)"
+    )
+    remove_dashes_apostrophes = st.checkbox(
+        "Enlever les tirets et apostrophes (remplacés par un espace)"
+    )
+    upper_cols = st.checkbox("Mettre les noms de colonnes en majuscules")
+    drop_empty_rows = st.checkbox("Supprimer les lignes entièrement vides")
 
-with st.expander("Statistiques descriptives"):
-    st.dataframe(df.describe(include="all"), use_container_width=True)
+    def strip_accents(text):
+        """Remplace les caractères accentués par leur équivalent non accentué."""
+        return "".join(
+            ch
+            for ch in unicodedata.normalize("NFKD", str(text))
+            if not unicodedata.combining(ch)
+        )
 
-# ---------- Traitements prédéfinis ----------
-st.subheader("Traitements")
-operations = []
+    def replace_dashes_apostrophes(text):
+        """Remplace tirets (-, –, —) et apostrophes (', ’) par un espace."""
+        for ch in ("-", "\u2013", "\u2014", "'", "\u2019"):
+            text = text.replace(ch, " ")
+        return text
 
-mode = st.radio("Mode de traitement", ["Traitements guidés", "Code Python personnalisé"], horizontal=True)
-result = df.copy()
+    df_processed = df.copy()
+    applied = []
 
-if mode == "Traitements guidés":
-    if st.checkbox("Supprimer les lignes dupliquées"):
-        before = len(result)
-        result = result.drop_duplicates()
-        operations.append(f"Suppression des doublons : {before - len(result)} lignes supprimées")
+    if trim_spaces:
+        for col in df_processed.select_dtypes(include="object").columns:
+            df_processed[col] = df_processed[col].apply(
+                lambda v: v.strip() if isinstance(v, str) else v
+            )
+        applied.append("suppression des espaces en début/fin")
 
-    cols_drop = st.multiselect("Supprimer des colonnes", df.columns)
-    if cols_drop:
-        result = result.drop(columns=cols_drop)
-        operations.append(f"Colonnes supprimées : {', '.join(cols_drop)}")
+    if remove_accents:
+        for col in df_processed.select_dtypes(include="object").columns:
+            df_processed[col] = df_processed[col].apply(
+                lambda v: strip_accents(v) if isinstance(v, str) else v
+            )
+        applied.append("suppression des accents")
 
-    fill_col = st.selectbox("Remplir les valeurs manquantes d'une colonne (optionnel)", ["—"] + list(df.columns))
-    if fill_col != "—":
-        fill_value = st.text_input("Valeur de remplacement", "0")
-        result[fill_col] = result[fill_col].fillna(fill_value)
-        operations.append(f"Valeurs manquantes de '{fill_col}' remplacées par '{fill_value}'")
+    if remove_dashes_apostrophes:
+        for col in df_processed.select_dtypes(include="object").columns:
+            df_processed[col] = df_processed[col].apply(
+                lambda v: replace_dashes_apostrophes(v) if isinstance(v, str) else v
+            )
+        applied.append("remplacement des tirets et apostrophes par un espace")
 
-    num_cols = df.select_dtypes("number").columns.tolist()
-    if num_cols:
-        filter_col = st.selectbox("Filtrer sur une colonne numérique (optionnel)", ["—"] + num_cols)
-        if filter_col != "—":
-            op = st.selectbox("Opérateur", ["Supérieur à", "Inférieur à", "Égal à"])
-            threshold = st.number_input("Seuil", value=0.0)
-            if op == "Supérieur à":
-                result = result[result[filter_col] > threshold]
-            elif op == "Inférieur à":
-                result = result[result[filter_col] < threshold]
-            else:
-                result = result[result[filter_col] == threshold]
-            operations.append(f"Filtre : {filter_col} {op.lower()} {threshold}")
-else:
-    st.markdown("Écrivez votre code Python. La variable `df` contient vos données ; "
-                "assignez le résultat à `result`.")
-    default_code = ("# Exemple : créer une colonne et filtrer\n"
-                    "# result = df[df['nom_colonne'] > 10]\n"
-                    "result = df\n")
-    user_code = st.text_area("Code Python (pandas disponible en tant que `pd`)", default_code, height=200)
-    if st.button("▶️ Exécuter le code"):
+    if upper_cols:
+        df_processed.columns = [str(c).upper() for c in df_processed.columns]
+        applied.append("noms de colonnes en majuscules")
+
+    if drop_empty_rows:
+        before = len(df_processed)
+        df_processed = df_processed.dropna(how="all")
+        applied.append(f"suppression des lignes vides ({before - len(df_processed)} ligne(s) supprimée(s))")
+
+    if applied:
+        st.info("Traitements appliqués : " + ", ".join(applied) + ".")
+
+    st.subheader("Aperçu du résultat")
+    st.dataframe(df_processed.head(50), use_container_width=True)
+
+    # ── Téléchargement ────────────────────────────────────────────────
+    st.header("⬇️ Téléchargement")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        csv_buffer = io.StringIO()
+        df_processed.to_csv(csv_buffer, index=False)
+        st.download_button(
+            "Télécharger en CSV",
+            data=csv_buffer.getvalue().encode("utf-8-sig"),
+            file_name="resultat.csv",
+            mime="text/csv",
+        )
+
+    with col2:
+        xlsx_buffer = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+            df_processed.to_excel(writer, index=False, sheet_name="Résultat")
+        st.download_button(
+            "Télécharger en XLSX",
+            data=xlsx_buffer.getvalue(),
+            file_name="resultat.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    # ── Code Python personnalisé ──────────────────────────────────────
+    st.header("✍️ Code Python personnalisé")
+    st.markdown(
+        "Votre code est exécuté avec le DataFrame chargé dans la variable `df`.\n\n"
+        "```python\n"
+        "# Exemple :\n"
+        "df = df.drop_duplicates()\n"
+        "df[\"TOTAL\"] = df[\"QTE\"] * df[\"PRIX\"]\n"
+        "```"
+    )
+
+    default_code = "# Votre DataFrame est disponible dans la variable 'df'\ndf = df.drop_duplicates()\n"
+    user_code = st.text_area("Éditeur de code", value=default_code, height=220)
+
+    if st.button("▶ Exécuter le code"):
         try:
-            namespace = {"df": df.copy(), "pd": pd, "result": None}
-            exec(user_code, namespace)  # noqa: S102 — environnement contrôlé de démonstration
-            result = namespace["result"]
-            operations.append("Code Python personnalisé exécuté")
-            st.success("✅ Code exécuté avec succès.")
+            exec_globals = {"df": df_processed.copy(), "pd": pd}
+            exec(user_code, exec_globals)
+            df_final = exec_globals["df"]
+            st.success("Code exécuté avec succès !")
+            st.dataframe(df_final.head(50), use_container_width=True)
+
+            csv_final = io.StringIO()
+            df_final.to_csv(csv_final, index=False)
+            st.download_button(
+                "⬇️ Télécharger le résultat du code (CSV)",
+                data=csv_final.getvalue().encode("utf-8-sig"),
+                file_name="resultat_code.csv",
+                mime="text/csv",
+            )
         except Exception as e:
             st.error(f"Erreur d'exécution : {e}")
-            st.stop()
-
-if operations:
-    with st.expander("Opérations appliquées"):
-        for op in operations:
-            st.write(f"- {op}")
-
-# ---------- Résultat et téléchargement ----------
-st.subheader("Résultat")
-st.dataframe(result, use_container_width=True)
-
-fmt = st.radio("Format de téléchargement", ["CSV", "XLSX"], horizontal=True)
-buffer = io.BytesIO()
-if fmt == "CSV":
-    data = result.to_csv(index=False).encode("utf-8")
-    file_name = "resultat.csv"
 else:
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        result.to_excel(writer, index=False, sheet_name="Résultat")
-    data = buffer.getvalue()
-    file_name = "resultat.xlsx"
+    st.info("Chargez un fichier pour commencer.")
 
-st.download_button("⬇️ Télécharger le résultat", data=data, file_name=file_name,
-                   mime="application/octet-stream")
+st.markdown("---")
+st.caption("© 2026 — Éditeur Python XLSX/CSV")
