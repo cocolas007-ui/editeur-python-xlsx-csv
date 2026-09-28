@@ -1,160 +1,135 @@
+import streamlit as st
+import pandas as pd
 import io
 import unicodedata
 
-import pandas as pd
-import streamlit as st
+st.set_page_config(page_title="Éditeur Python XLSX/CSV", layout="wide")
+st.title("📊 Éditeur de fichiers XLSX / CSV avec traitements Python")
 
-st.set_page_config(page_title="Éditeur de fichiers XLSX / CSV", page_icon="📝", layout="wide")
+DEFAULT_CODE = '''import pandas as pd
 
-st.title("📝 Éditeur de fichiers XLSX / CSV")
+def traiter(df):
+    # Exemple de traitement : votre code ici
+    # df = df.dropna(how="all")
+    return df
+'''
 
-# ---------- Confidentialité ----------
-with st.expander("🔒 Confidentialité"):
-    st.info(
-        "Les fichiers que vous chargez sont traités **uniquement en mémoire**, pendant votre session. "
-        "Ils ne sont ni stockés sur un serveur, ni visibles par les autres utilisateurs, "
-        "et les fichiers téléchargés sont générés à la volée sur votre machine."
-    )
-
-# ---------- Utilitaires ----------
-
-def normaliser(texte):
-    """Minuscules, sans accents, espaces trimmés — pour les rapprochements."""
-    if pd.isna(texte):
-        return ""
-    texte = str(texte).strip().lower()
-    texte = unicodedata.normalize("NFKD", texte)
-    return "".join(c for c in texte if not unicodedata.combining(c))
-
+# ---------------- Fonctions de nettoyage ----------------
 
 def enlever_accents(texte):
-    if pd.isna(texte):
+    if not isinstance(texte, str):
         return texte
-    texte = str(texte)
-    decomp = unicodedata.normalize("NFKD", texte)
-    return "".join(c for c in decomp if not unicodedata.combining(c))
+    nfkd = unicodedata.normalize("NFKD", texte)
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
 
-
-def enlever_tirets_apostrophes(texte):
-    if pd.isna(texte):
+def remplacer_tirets_apostrophes(texte):
+    if not isinstance(texte, str):
         return texte
-    texte = str(texte)
-    for ch in ("-", "–", "—", "'", "’"):
-        texte = texte.replace(ch, " ")
-    return texte
+    return texte.replace("-", " ").replace("'", " ").replace("’", " ")
 
+# ---------------- Upload du fichier principal ----------------
+st.header("1️⃣ Charger le fichier principal")
+fichier = st.file_uploader("Fichier XLSX ou CSV", type=["xlsx", "xls", "csv"], key="principal")
 
-def appliquer_traitements(df, opts):
-    """Applique les traitements choisis sur les colonnes de texte."""
-    df = df.copy()
-    colonnes_texte = [c for c in df.columns if df[c].dtype == object]
-    for col in colonnes_texte:
-        if opts["accents"]:
-            df[col] = df[col].map(enlever_accents)
-        if opts["tirets"]:
-            df[col] = df[col].map(enlever_tirets_apostrophes)
-    return df
+df = None
+if fichier is not None:
+    try:
+        if fichier.name.lower().endswith(".csv"):
+            df = pd.read_csv(fichier, sep=None, engine="python")
+        else:
+            df = pd.read_excel(fichier)
+        st.success(f"Fichier chargé : {df.shape[0]} lignes, {df.shape[1]} colonnes")
+    except Exception as e:
+        st.error(f"Erreur de lecture : {e}")
 
+if df is not None:
+    st.subheader("Aperçu du fichier")
+    st.dataframe(df.head(20))
 
-def ajouter_ville_rattachement(df, df_agences):
-    """Ajoute la colonne 'Ville de rattachement' juste après 'Ville de départ'.
+    # ---------------- Traitements automatiques ----------------
+    st.header("2️⃣ Traitements")
+    opt_maj = st.checkbox("Mettre les noms de colonnes en majuscules")
+    opt_vides = st.checkbox("Supprimer les lignes entièrement vides")
+    opt_accents = st.checkbox("Enlever tous les accents (remplacés par la lettre correspondante)")
+    opt_tirets = st.checkbox("Enlever les tirets et apostrophes (remplacés par un espace)")
 
-    Rapproche la valeur de 'Ville de départ' du champ 'agence de rattachement'
-    du fichier de correspondance et y associe la 'ville' correspondante.
-    """
-    df = df.copy()
-    agences = df_agences.copy()
+    # ---------------- Ville de rattachement ----------------
+    st.header("3️⃣ Colonne 'Ville de rattachement'")
+    opt_rattach = st.checkbox("Ajouter une colonne 'Ville de rattachement' après 'Ville de départ'")
 
-    # Recherche insensible à la casse / aux accents des colonnes
-    col_depart = next((c for c in df.columns if normaliser(c) == "ville de depart"), None)
-    col_agence = next((c for c in agences.columns if normaliser(c) == "agence de rattachement"), None)
-    col_ville = next((c for c in agences.columns if normaliser(c) == "ville"), None)
+    df_agences = None
+    if opt_rattach:
+        fichier_ag = st.file_uploader("Fichier CSV des agences (colonnes : 'agence de rattachement' et 'ville')", type=["csv"], key="agences")
+        if fichier_ag is not None:
+            try:
+                df_agences = pd.read_csv(fichier_ag, sep=None, engine="python")
+                colonnes_basse = [c.strip().lower() for c in df_agences.columns]
+                col_agence = df_agences.columns[colonnes_basse.index("agence de rattachement")]
+                col_ville = df_agences.columns[colonnes_basse.index("ville")]
+                df_agences = df_agences[[col_agence, col_ville]].copy()
+                df_agences.columns = ["agence", "ville"]
+                # Clé de rapprochement normalisée
+                def cle(v):
+                    v = enlever_accents(str(v)).lower().strip()
+                    v = remplacer_tirets_apostrophes(v)
+                    return " ".join(v.split())
+                df_agences["_cle"] = df_agences["agence"].apply(cle)
+                mapping = dict(zip(df_agences["_cle"], df_agences["ville"]))
 
-    if not col_depart:
-        st.warning("Colonne 'Ville de départ' introuvable dans le fichier principal.")
-        return df
-    if not col_agence or not col_ville:
-        st.warning("Colonnes 'agence de rattachement' et/ou 'ville' introuvables dans le fichier de correspondance.")
-        return df
+                # Trouver la colonne 'Ville de départ'
+                col_depart = None
+                for c in df.columns:
+                    if cle(c) == "ville de depart":
+                        col_depart = c
+                        break
+                if col_depart is None:
+                    st.error("Colonne 'Ville de départ' introuvable dans le fichier principal.")
+                else:
+                    pos = df.columns.get_loc(col_depart) + 1
+                    valeurs = df[col_depart].apply(cle).map(mapping).fillna("")
+                    df.insert(pos, "Ville de rattachement", valeurs)
+                    st.success("Colonne 'Ville de rattachement' ajoutée.")
+            except Exception as e:
+                st.error(f"Erreur lors du rapprochement : {e}")
 
-    # Table de correspondance : agence (normalisée) -> ville (valeur d'origine)
-    mapping = (
-        agences[[col_agence, col_ville]]
-        .dropna(subset=[col_agence])
-        .drop_duplicates(subset=[col_agence].__class__([col_agence])[0])
-    )
-    mapping = dict(
-        zip(normaliser_series(agences[col_agence]), agences[col_ville])
-    )
+    # ---------------- Éditeur de code Python ----------------
+    st.header("4️⃣ Traitement Python personnalisé")
+    code = st.text_area("Votre code Python (fonction traiter(df) -> df)", DEFAULT_CODE, height=250)
 
-    # Nouvelle colonne remplie par correspondance
-    valeurs = normaliser_series(df[col_depart]).map(mapping)
-    df["Ville de rattachement"] = valeurs
+    df_final = df.copy()
+    if opt_maj:
+        df_final.columns = [str(c).upper() for c in df_final.columns]
+    if opt_vides:
+        df_final = df_final.dropna(how="all")
+    if opt_accents:
+        df_final = df_final.applymap(enlever_accents)
+        df_final.columns = [enlever_accents(str(c)) for c in df_final.columns]
+    if opt_tirets:
+        df_final = df_final.applymap(remplacer_tirets_apostrophes)
+        df_final.columns = [remplacer_tirets_apostrophes(str(c)) for c in df_final.columns]
 
-    # Réordonner : insérer juste après 'Ville de départ'
-    colonnes = list(df.columns)
-    colonnes.remove("Ville de rattachement")
-    idx = colonnes.index(col_depart) + 1
-    colonnes.insert(idx, "Ville de rattachement")
-    return df[colonnes]
-
-
-def normaliser_series(serie):
-    return serie.map(normaliser)
-
-# ---------- Chargement ----------
-st.header("1. Charger un fichier")
-fichier = st.file_uploader("Fichier XLSX ou CSV", type=["xlsx", "xls", "csv"])
-
-if fichier is None:
-    st.stop()
-
-if fichier.name.lower().endswith(".csv"):
-    df = pd.read_csv(fichier, dtype=str, keep_default_na=False)
-else:
-    df = pd.read_excel(fichier, dtype=str)
-
-st.success(f"Fichier chargé : **{fichier.name}** — {len(df)} lignes, {len(df.columns)} colonnes.")
-
-# ---------- Traitements ----------
-st.header("2. Traitements")
-opts = {
-    "accents": st.checkbox("Enlever tous les accents (remplacés par la lettre correspondante)"),
-    "tirets": st.checkbox("Enlever les tirets et apostrophes (remplacés par un espace)"),
-}
-
-# Option Ville de rattachement
-if st.checkbox("Ajouter une colonne 'Ville de rattachement' (rapprochement avec fichier agences/villes)"):
-    st.markdown(
-        "Chargez un CSV contenant les colonnes **agence de rattachement** et **ville**. "
-        "La valeur de la colonne **Ville de départ** est rapprochée du champ *agence de rattachement* "
-        "pour récupérer la ville correspondante."
-    )
-    fichier_agences = st.file_uploader("Fichier de correspondance (CSV)", type=["csv"], key="agences")
-    if fichier_agences is not None:
+    if st.button("▶️ Exécuter le traitement"):
         try:
-            df_agences = pd.read_csv(fichier_agences, dtype=str, keep_default_na=False)
-            df = ajouter_ville_rattachement(df, df_agences)
-            st.success("Colonne 'Ville de rattachement' ajoutée.")
+            exec(code, {"pd": pd, "df": df_final})
+            if callable(eval("traiter")):
+                df_final = eval("traiter")(df_final)
+            st.session_state["resultat"] = df_final
+            st.success("Traitement exécuté.")
         except Exception as e:
-            st.error(f"Erreur lors du chargement du fichier de correspondance : {e}")
+            st.error(f"Erreur dans le code Python : {e}")
 
-df = appliquer_traitements(df, opts)
+    if "resultat" in st.session_state:
+        df_res = st.session_state["resultat"]
+        st.subheader("Aperçu du résultat")
+        st.dataframe(df_res.head(50))
 
-# ---------- Aperçu ----------
-st.header("3. Aperçu")
-st.dataframe(df, use_container_width=True)
+        # ---------------- Téléchargements ----------------
+        st.header("5️⃣ Télécharger le résultat")
+        csv_buf = io.StringIO()
+        df_res.to_csv(csv_buf, index=False)
+        st.download_button("⬇️ Télécharger en CSV", csv_buf.getvalue(), "resultat.csv", "text/csv")
 
-# ---------- Téléchargement ----------
-st.header("4. Téléchargement")
-
-col1, col2 = st.columns(2)
-with col1:
-    csv_data = df.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Télécharger en CSV", csv_data, "resultat.csv", "text/csv")
-with col2:
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
-    st.download_button("⬇️ Télécharger en XLSX", buffer.getvalue(), "resultat.xlsx",
-                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        xlsx_buf = io.BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
+            df_res.to_excel(writer, index=False, sheet_name="Résultat")
+        st.download_button("⬇️ Télécharger en XLSX", xlsx_buf.getvalue(), "resultat.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
